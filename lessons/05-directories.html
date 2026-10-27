@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Ch 5: The Filing Cabinet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/styles.css">
+<link rel="stylesheet" href="../assets/components.css">
+<link rel="stylesheet" href="../assets/toolbar.css">
+<link rel="stylesheet" href="../assets/csc.css">
+</head>
+<body>
+<main class="lesson">
+
+  <p class="eyebrow">CSC 2050 / The Life of a Process &middot; Chapter 5</p>
+  <h1>The Filing Cabinet</h1>
+  <p class="dek">List a folder, turn names into paths, tell files from folders, and walk an entire directory tree with recursion.</p>
+  <p style="font-family:var(--mono);font-size:0.78rem;color:var(--muted);">~35 min &middot; 14 checkpoints &middot; Lab 7 topic</p>
+
+  <div class="callout">
+    <span class="label">The new job</span>
+    P can clone itself (Ch 1), share a whiteboard (Ch 2), and keep the clones from fighting over it (Ch 3). Now P gets a new kind of job: <strong>go into a folder and count everything inside, including the folders inside the folders.</strong> That takes three skills: list a folder (5.1), turn a name into a path (5.2), tell a file from a folder (5.3). Then recursion ties them together (5.4).
+  </div>
+
+<pre><code><span class="c-k">#include</span> <span class="c-s">&lt;stdio.h&gt;</span>
+<span class="c-k">#include</span> <span class="c-s">&lt;string.h&gt;</span>
+<span class="c-k">#include</span> <span class="c-s">&lt;dirent.h&gt;</span>    <span class="c-c">// opendir readdir</span>
+<span class="c-k">#include</span> <span class="c-s">&lt;sys/stat.h&gt;</span>  <span class="c-c">// stat lstat S_ISDIR</span></code></pre>
+
+  <!-- ===================== 5.1 ===================== -->
+  <h2 id="list"><span class="sec">5.1</span>A directory is a list of names</h2>
+  <p><strong>Analogy:</strong> a folder in a filing cabinet has a <strong>table of contents</strong> taped inside the cover. Opening the folder doesn't hand you the documents, just that list of names, one line at a time.</p>
+  <p>That's literally what a Unix directory is: a special file holding <strong>names</strong>. In Eckhardt's words, "they're just names, they're just character arrays."</p>
+<pre><code>DIR *d = opendir(path);  <span class="c-c">// NULL = failed</span>
+<span class="c-k">struct</span> dirent *entry;
+<span class="c-k">while</span> ((entry = readdir(d)) != NULL) {
+    printf(<span class="c-s">"%s\n"</span>, entry-&gt;d_name);
+}
+closedir(d);</code></pre>
+  <div class="tscroll narrow"><table class="cardinality-table">
+    <tr><th>Call</th><th>Like</th><th>Returns</th></tr>
+    <tr><td><code>opendir</code></td><td><code>fopen</code></td><td><code>DIR *</code> or NULL</td></tr>
+    <tr><td><code>readdir</code></td><td><code>fread</code></td><td>next entry, NULL at end</td></tr>
+    <tr><td><code>closedir</code></td><td><code>fclose</code></td><td>releases the handle</td></tr>
+  </table></div>
+  <p>Eckhardt: <code>readdir</code> "will read one entry at a time... it's like fread, it goes further on automatically, and when it's at the end it will return null." In <code>while ((entry = readdir(d)) != NULL)</code>, the inner parentheses assign first, then compare.</p>
+
+  <h3>The two strange entries</h3>
+<pre><code>.    this directory     ls .   = here
+..   the parent         cd ..  = go up</code></pre>
+  <p>Every directory lists them, every time. He points them out in his demo: "the single dot represents itself... the double dot represents the parent directory."</p>
+  <div class="trap">
+    <span class="tag">Skip them</span>
+    When you walk into subfolders, entering <code>.</code> puts you back in the same folder and <code>..</code> goes <em>up</em>, so you loop forever. Every walker starts with:<br>
+    <code>if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;</code><br>
+    <code>strcmp</code> returns <strong>0 when the strings are equal</strong>. Never compare strings with <code>==</code>, which only compares the pointer addresses.
+  </div>
+
+  <div class="mcq" data-q="d1"></div>
+  <div class="mcq" data-q="d2"></div>
+  <div class="mcq" data-q="d3"></div>
+  <div class="mcq" data-q="d4"></div>
+
+  <!-- ===================== 5.2 ===================== -->
+  <h2 id="path"><span class="sec">5.2</span>A name is not a path</h2>
+  <p><code>readdir</code> gives you <code>"notes.txt"</code>, <strong>just the name</strong>, not where it lives.</p>
+<pre><code>opened:  /home/kdlin/2050
+d_name:  "notes.txt"
+real:    /home/kdlin/2050/notes.txt</code></pre>
+  <p>A bare name is looked up relative to the program's <strong>current working directory</strong>, the folder you launched it from. Eckhardt gets burned by this on camera: his <code>stat</code> returned <code>-1</code> and garbage numbers because VS Code's debugger started the program from a different folder than the code runner.</p>
+  <p><strong>The fix: glue the folder and the name together.</strong></p>
+<pre><code><span class="c-k">char</span> full[1000];
+snprintf(full, <span class="c-k">sizeof</span>(full), <span class="c-s">"%s/%s"</span>,
+         path, entry-&gt;d_name);
+<span class="c-c">// "/home/kdlin/2050" + "notes.txt"</span>
+<span class="c-c">// -&gt; "/home/kdlin/2050/notes.txt"</span></code></pre>
+  <p><code>snprintf</code> is <code>printf</code> into a string, and the <code>n</code> means it <strong>never writes past <code>sizeof(full)</code></strong>. A very long path gets cut off instead of overflowing the buffer. He uses 1000 characters as a safe path size.</p>
+
+  <div class="mcq" data-q="n1"></div>
+  <div class="mcq" data-q="n2"></div>
+
+  <!-- ===================== 5.3 ===================== -->
+  <h2 id="stat"><span class="sec">5.3</span>File or folder? stat</h2>
+  <p>Names don't say what they are: <code>notes</code> could be a file or a folder. <strong>Analogy:</strong> reading the table of contents gives you labels. <code>stat</code> walks to the drawer and pulls the <strong>index card</strong>: type, size, timestamps.</p>
+<pre><code><span class="c-k">struct</span> stat st;
+<span class="c-k">if</span> (stat(full, &amp;st) == 0) {     <span class="c-c">// 0 = ok</span>
+    <span class="c-k">if</span> (S_ISDIR(st.st_mode))
+        printf(<span class="c-s">"dir\n"</span>);
+    <span class="c-k">else if</span> (S_ISREG(st.st_mode))
+        printf(<span class="c-s">"file, %ld bytes\n"</span>,
+               (<span class="c-k">long</span>)st.st_size);
+} <span class="c-k">else</span> {
+    printf(<span class="c-s">"stat failed\n"</span>); <span class="c-c">// -1</span>
+}</code></pre>
+  <ul>
+    <li><strong>The struct and the function are both called <code>stat</code>.</strong> "The weird thing here is that the structure is called stat but the function is also called stat."</li>
+    <li><strong><code>&amp;st</code>:</strong> you pass the address because the struct is an <strong>output</strong> that stat fills in. "It's not an input, it's an output."</li>
+    <li><strong>Return value:</strong> <code>0</code> means success, <code>-1</code> means error. On <code>-1</code> the struct is garbage, which is exactly what bit him in the debugger. <strong>Always check it.</strong></li>
+    <li><strong><code>st_mode</code></strong> packs the type bits. Decode it with macros: <code>S_ISDIR</code> (folder), <code>S_ISREG</code> (regular file), <code>S_ISLNK</code> (symlink, visible only with lstat).</li>
+  </ul>
+  <p>Other fields he shows: <code>st_size</code> (bytes), <code>st_blksize</code> (usually <strong>4K</strong>: even a 3-byte file takes a 4K block on disk, the same idea as memory pages), and the access, modify and change timestamps.</p>
+
+  <h3>stat vs lstat</h3>
+  <p>A <strong>symbolic link</strong> is a shortcut: a tiny file pointing at another path.</p>
+<pre><code>stat(link)   follows it, describes TARGET
+lstat(link)  describes the LINK itself</code></pre>
+  <p>A shortcut inside a folder can point <strong>back up at that folder</strong>. A walker using <code>stat</code> sees "directory!", walks in, finds the shortcut again, and keeps going forever. <code>lstat</code> reports "this is a link", so you count it and move on. Same call, same struct, one letter different.</p>
+
+  <div class="mcq" data-q="s1"></div>
+  <div class="mcq" data-q="s2"></div>
+  <div class="mcq" data-q="s3"></div>
+  <div class="mcq" data-q="s4"></div>
+
+  <!-- ===================== 5.4 ===================== -->
+  <h2 id="tree"><span class="sec">5.4</span>Walking the whole tree</h2>
+  <p>Eckhardt leaves this as a puzzle at the end of his Directories video. You <em>could</em> nest a second <code>opendir</code> loop, then a third... "that's not a smart way. Smart would be if you take this into a function and do it recursively."</p>
+  <p><strong>Analogy:</strong> your instructions for inventorying any folder: <em>"For each item: if it's a document, tally it. If it's a folder, follow <strong>these same instructions</strong> on it, then come back and keep going."</em></p>
+<pre><code><span class="c-k">void</span> walk(<span class="c-k">const char</span> *path) {
+    DIR *d = opendir(path);
+    <span class="c-k">if</span> (!d) <span class="c-k">return</span>;
+    <span class="c-k">struct</span> dirent *e;
+    <span class="c-k">char</span> full[1000];
+    <span class="c-k">while</span> ((e = readdir(d)) != NULL) {
+        <span class="c-k">if</span> (!strcmp(e-&gt;d_name, <span class="c-s">"."</span>) ||
+            !strcmp(e-&gt;d_name, <span class="c-s">".."</span>))
+            <span class="c-k">continue</span>;               <span class="c-c">// 5.1</span>
+        snprintf(full, <span class="c-k">sizeof</span> full,
+                 <span class="c-s">"%s/%s"</span>, path, e-&gt;d_name); <span class="c-c">// 5.2</span>
+        <span class="c-k">struct</span> stat st;
+        <span class="c-k">if</span> (lstat(full, &amp;st)) <span class="c-k">continue</span>; <span class="c-c">// 5.3</span>
+        <span class="c-k">if</span> (S_ISDIR(st.st_mode)) {
+            dirs++;
+            <span class="c-hl">walk(full);</span>              <span class="c-c">// 5.4</span>
+        } <span class="c-k">else</span> {
+            files++;
+        }
+    }
+    closedir(d);
+}</code></pre>
+  <p><code>!strcmp(a, b)</code> is shorthand for <code>strcmp(a, b) == 0</code>. <code>if (lstat(...))</code> is true when it returns <code>-1</code>, meaning it failed.</p>
+
+<pre><code>2050/
+├── a.c
+├── pics/
+│   ├── cat.bmp
+│   └── old/
+│       └── dog.bmp
+└── b.c
+
+walk("2050")
+ a.c      files=1
+ pics     dirs=1 -&gt; walk("2050/pics")
+   cat.bmp  files=2      (2050 paused)
+   old      dirs=2 -&gt; walk(".../old")
+     dog.bmp files=3
+     closedir, return
+   closedir, return
+ b.c      files=4    (2050 resumes)</code></pre>
+
+  <div class="worked-example">
+    <h4>Why it works</h4>
+    <div class="step"><span class="step-num">1.</span><span><strong>Every call has its own <code>d</code>, <code>e</code> and <code>full</code></strong> on the stack. While <code>walk("2050/pics")</code> runs, the outer loop is frozen with its own <code>DIR *</code> still holding its place.</span></div>
+    <div class="step"><span class="step-num">2.</span><span><strong>The base case is built in:</strong> a folder with no subfolders makes no recursive call, so the loop ends, <code>closedir</code> runs, and it returns.</span></div>
+    <div class="step"><span class="step-num">3.</span><span><strong>Skipping <code>.</code>/<code>..</code> and using <code>lstat</code> keep it finite.</strong> Without them it recurses forever.</span></div>
+    <div class="result">files = 4, dirs = 2 (the root itself isn't counted)</div>
+  </div>
+
+  <div class="insight">
+    <span class="tag">Chapter 3 connection</span>
+    If <strong>two processes</strong> each walk part of the tree and bump the <strong>same</strong> counters, those counters live in mmap shared memory and every <code>dirs++</code> / <code>files++</code> is a critical section. That's where Peterson comes back.
+  </div>
+
+  <div class="mcq" data-q="r1"></div>
+  <div class="mcq" data-q="r2"></div>
+  <div class="mcq" data-q="r3"></div>
+  <div class="mcq" data-q="r4"></div>
+
+  <!-- ===================== summary ===================== -->
+  <h2 id="summary">One-screen summary</h2>
+<pre><code>opendir(path) -&gt; DIR* or NULL
+readdir(d)    -&gt; next dirent*, NULL at end
+closedir(d)
+d_name = NAME only, includes . and ..
+  -&gt; skip both with strcmp == 0
+path: snprintf(full, sizeof full,
+               "%s/%s", path, name)
+stat(full, &amp;st): 0 ok / -1 fail
+  (&amp;st = output param, garbage on -1)
+S_ISDIR / S_ISREG on st.st_mode
+lstat = don't follow symlinks
+walk(dir): for each entry:
+  skip ./.., build path, lstat,
+  dir ? dirs++, walk(full) : files++
+  then closedir</code></pre>
+
+  <div class="trap">
+    <span class="tag">Common mistakes</span>
+    Not skipping <code>.</code>/<code>..</code> &middot; using <code>d_name</code> as a path &middot; not checking stat's return &middot; <code>stat</code> instead of <code>lstat</code> &middot; comparing strings with <code>==</code> &middot; forgetting <code>closedir</code> &middot; assuming readdir returns entries alphabetically.
+  </div>
+
+  <div class="callout">
+    <span class="label">Try at a keyboard</span>
+    <strong>list.c:</strong> print a folder's entries marked DIR or FILE.<br>
+    <strong>tree.c:</strong> print the whole tree indented by depth (add an <code>int depth</code> parameter and pass <code>depth + 1</code>).<br>
+    <strong>Verify:</strong> compare your counts with <code>find DIR -mindepth 1 ! -type d | wc -l</code> (files) and <code>-type d</code> (dirs).
+  </div>
+
+  <h2 id="score">Your score</h2>
+  <div id="results"></div>
+
+  <footer class="nav">
+    <a href="03-mutex.html" style="color:var(--white)">&larr; Ch 3: Mutex</a>
+    <span>CSC 2050 &middot; Chapter 5</span>
+  </footer>
+</main>
+
+<script>
+window.QUIZ = {
+  d1: {
+    tag: "5.1 Directories",
+    q: "What does <code>readdir</code> actually hand you for each entry?",
+    opts: [
+      { t: "The file's contents", why: "A directory only holds names. To get contents you'd open the file itself." },
+      { t: "A <code>struct dirent</code> whose <code>d_name</code> is the entry's name", why: "Right. A directory is a table of contents, so you get one name per call." },
+      { t: "A full absolute path", why: "<code>d_name</code> is just the name (<code>\"notes.txt\"</code>). Building the path is your job (5.2)." },
+      { t: "A file-or-folder flag you can always trust", why: "<code>d_type</code> exists but may be <code>DT_UNKNOWN</code> on some filesystems. stat/lstat is the reliable way, and it's what the lecture uses." }
+    ], a: 1 },
+  d2: {
+    tag: "5.1 Directories",
+    q: "How does the <code>while ((entry = readdir(d)) != NULL)</code> loop know when to stop?",
+    opts: [
+      { t: "You pass readdir an index that you increment", why: "readdir keeps its own position. In his words, 'I don't have to enter a running number.'" },
+      { t: "readdir returns NULL when there are no more entries", why: "Yes. Like fread it advances automatically, and NULL means the list is done." },
+      { t: "readdir returns the empty string <code>\"\"</code> at the end", why: "It returns a pointer, and the end is signaled by a NULL pointer, not an empty name." },
+      { t: "closedir makes the next readdir fail", why: "closedir comes after the loop. The loop ends because readdir returns NULL." }
+    ], a: 1 },
+  d3: {
+    tag: "5.1 Directories",
+    q: "A folder holds <code>a.txt</code>, <code>b.txt</code> and a subfolder <code>pics</code>. How many times does the loop body run?",
+    opts: [
+      { t: "3", why: "You forgot the two entries every directory has: <code>.</code> and <code>..</code>." },
+      { t: "4", why: "Count again: a.txt, b.txt, pics, plus <code>.</code> and <code>..</code>." },
+      { t: "5", why: "Right: <code>.</code>, <code>..</code>, a.txt, b.txt, pics (in no guaranteed order). The 6th call returns NULL." },
+      { t: "It depends on what's inside pics", why: "readdir lists only this folder's own entries. It doesn't descend into pics." }
+    ], a: 2 },
+  d4: {
+    tag: "5.1 Directories",
+    q: "Which check correctly skips the current directory entry?",
+    opts: [
+      { t: "<code>if (entry-&gt;d_name == \".\") continue;</code>", why: "<code>==</code> compares two pointer addresses, which are never equal, so this never skips." },
+      { t: "<code>if (strcmp(entry-&gt;d_name, \".\")) continue;</code>", why: "Backwards. strcmp returns 0 on a match, so this skips everything EXCEPT \".\"." },
+      { t: "<code>if (strcmp(entry-&gt;d_name, \".\") == 0) continue;</code>", why: "Correct. 0 means the strings are equal." },
+      { t: "<code>if (entry-&gt;d_name[0] == '.') continue;</code>", why: "That also skips hidden files like <code>.vscode</code> and <code>.gitignore</code>, which are real entries you should count." }
+    ], a: 2 },
+  n1: {
+    tag: "5.2 Paths",
+    q: "Your program runs from <code>/home/kdlin</code>, opens <code>/tmp/data</code>, and readdir returns <code>\"x.c\"</code>. What does <code>stat(\"x.c\", &amp;st)</code> do?",
+    opts: [
+      { t: "Finds /tmp/data/x.c, since that's the open directory", why: "Opening a directory doesn't change where bare names are looked up. They're resolved from the working directory." },
+      { t: "Looks for /home/kdlin/x.c, the wrong place, and probably returns -1", why: "Right. Bare names resolve against the working directory, which is the same trap that hit Eckhardt in the debugger." },
+      { t: "Searches every directory for x.c", why: "stat never searches. It checks exactly one path." },
+      { t: "Crashes the program", why: "It doesn't crash. It returns -1, and the danger is reading the garbage struct afterward." }
+    ], a: 1 },
+  n2: {
+    tag: "5.2 Paths",
+    q: "What does <code>snprintf(full, sizeof full, \"%s/%s\", \".\", \"pics\")</code> put in <code>full</code>?",
+    opts: [
+      { t: "<code>\"./pics\"</code>", why: "Correct, and it's a valid path: <code>.</code> means here, so it's the pics folder in the current directory." },
+      { t: "<code>\"pics\"</code>", why: "The format glues both strings with a slash: \".\" + \"/\" + \"pics\"." },
+      { t: "It prints ./pics to the screen", why: "That's printf. snprintf writes into the buffer instead." },
+      { t: "<code>\"/pics\"</code>", why: "The first %s is \".\", so the result starts with a dot." }
+    ], a: 0 },
+  s1: {
+    tag: "5.3 stat",
+    q: "Why is it <code>stat(full, &amp;st)</code> and not <code>stat(full, st)</code>?",
+    opts: [
+      { t: "The struct is large and & saves memory", why: "Passing by value would also hand stat a copy, so your variable would never be filled in." },
+      { t: "st is an output: stat must write into YOUR struct, so it needs the address", why: "Yes. In his words, 'It's not an input, it's an output.'" },
+      { t: "The & tells stat to follow symlinks", why: "Following symlinks is the difference between stat and lstat, not the &." },
+      { t: "It's just required syntax with no real reason", why: "There's a real reason: C passes by value, so a function can only change your variable through its address." }
+    ], a: 1 },
+  s2: {
+    tag: "5.3 stat",
+    q: "stat returns <code>-1</code>. What's in <code>st.st_size</code>?",
+    opts: [
+      { t: "0", why: "Nothing zeroed it. It's whatever bytes were already on the stack." },
+      { t: "-1", why: "-1 is the return value of the function, not the contents of the struct." },
+      { t: "Garbage. Never read the struct after a failed stat", why: "Right, the same lesson as <code>int sum;</code>. That's the 'weird numbers' in his debugger demo." },
+      { t: "The size of the parent directory", why: "stat didn't fill in anything on failure." }
+    ], a: 2 },
+  s3: {
+    tag: "5.3 stat",
+    q: "How do you check whether a stat'd item is a directory?",
+    opts: [
+      { t: "<code>st.st_mode == DIR</code>", why: "st_mode packs the type with permission bits, so a direct comparison fails. Use the macro." },
+      { t: "<code>S_ISDIR(st.st_mode)</code>", why: "Correct. The macro pulls the type bits out of st_mode." },
+      { t: "<code>st.st_size == 4096</code>", why: "Size is a terrible test: plenty of files are 4096 bytes and big folders can be larger." },
+      { t: "Check whether the name ends with <code>/</code>", why: "d_name never ends with a slash. Names don't tell you the type, which is why stat exists." }
+    ], a: 1 },
+  s4: {
+    tag: "5.3 stat vs lstat",
+    q: "Folder <code>loop</code> contains a symlink <code>back</code> pointing to <code>loop</code>. A recursive walker uses <code>stat</code>. What happens?",
+    opts: [
+      { t: "It counts back as a file and moves on", why: "That's what lstat does. stat follows the link and reports the target, a directory." },
+      { t: "It recurses into loop/back/back/back... until the path or stack runs out", why: "Right. stat sees a directory every time, so it keeps walking in. lstat fixes it." },
+      { t: "readdir hides symlinks, so nothing happens", why: "readdir lists symlinks like any other name." },
+      { t: "stat returns -1 for symlinks", why: "stat succeeds and describes the target. That's exactly why it walks in." }
+    ], a: 1 },
+  r1: {
+    tag: "5.4 Recursion",
+    q: "For the 2050/ tree in the diagram (not counting 2050 itself), what are files and dirs?",
+    opts: [
+      { t: "files = 4, dirs = 2", why: "Correct: a.c, cat.bmp, dog.bmp and b.c are files; pics and old are dirs." },
+      { t: "files = 4, dirs = 3", why: "The root (2050) isn't counted. Only pics and old." },
+      { t: "files = 2, dirs = 2", why: "That's only the top level. Recursion also counts cat.bmp and dog.bmp." },
+      { t: "files = 6, dirs = 2", why: "Folders aren't files. Count them only in dirs." }
+    ], a: 0 },
+  r2: {
+    tag: "5.4 Recursion",
+    q: "What goes wrong if <code>DIR *d</code> is a single global variable instead of a local in walk()?",
+    opts: [
+      { t: "Nothing; it just saves a little stack memory", why: "Trace it: the inner call overwrites and closes the one shared handle." },
+      { t: "The inner call overwrites d and closes it, so the outer loop's next readdir uses a dead, wrong handle", why: "Right. Each recursive frame needs its own bookmark into its own folder." },
+      { t: "It won't compile", why: "It compiles fine. The bug only appears at runtime, once there's a subfolder." },
+      { t: "It only matters for symlinks", why: "Any subfolder triggers it, since the first nested call clobbers d." }
+    ], a: 1 },
+  r3: {
+    tag: "5.4 Recursion",
+    q: "You forget <code>closedir(d)</code>, and the tree has 100,000 folders. What happens?",
+    opts: [
+      { t: "Nothing; the OS closes them when the function returns", why: "Handles stay open until closedir or process exit. Returning doesn't close them." },
+      { t: "Open handles pile up until opendir starts returning NULL, and folders get silently skipped", why: "Right. Each process has a file descriptor limit (often 1024), so the count comes out short with no error." },
+      { t: "The program crashes immediately", why: "It doesn't crash. With <code>if (!d) return;</code> it just quietly skips, which is worse because nothing tells you." },
+      { t: "Files get counted twice", why: "Leaking handles doesn't cause double counting. It causes skipped folders once opendir fails." }
+    ], a: 1 },
+  r4: {
+    tag: "5.4 + Ch 3",
+    q: "Two processes each walk half the tree and both do <code>files++</code> on mmap-shared counters with no lock. The total is...",
+    opts: [
+      { t: "Always correct, since they walk different folders", why: "Different folders, but the SAME counter. Every <code>files++</code> is a LOAD/ADD/STORE race." },
+      { t: "Sometimes too low", why: "Right. The counters are shared, so each increment is a critical section, which is what Peterson protects in Ch 3." },
+      { t: "Sometimes too high", why: "Races only lose increments; they never invent extra ones." },
+      { t: "Exactly half, since one process overwrites the other", why: "They interleave constantly. Only some updates are lost." }
+    ], a: 1 }
+};
+</script>
+<script src="../assets/lesson.js"></script>
+<script src="../assets/glossary.js"></script>
+<script src="../assets/course.js"></script>
+<script src="../assets/toolbar.js"></script>
+<script src="../assets/mcq.js"></script>
+</body>
+</html>

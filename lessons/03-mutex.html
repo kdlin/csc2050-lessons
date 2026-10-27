@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Ch 3: Two Clones, One Marker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/styles.css">
+<link rel="stylesheet" href="../assets/components.css">
+<link rel="stylesheet" href="../assets/toolbar.css">
+<link rel="stylesheet" href="../assets/csc.css">
+</head>
+<body>
+<main class="lesson">
+
+  <p class="eyebrow">CSC 2050 / The Life of a Process &middot; Chapter 3</p>
+  <h1>Two Clones, One Marker</h1>
+  <p class="dek">Why shared memory breaks counters, what a mutex has to guarantee, and how Peterson's algorithm guarantees it with two variables.</p>
+  <p style="font-family:var(--mono);font-size:0.78rem;color:var(--muted);">~45 min &middot; 18 checkpoints &middot; Lab 7 topic</p>
+
+  <div class="callout">
+    <span class="label">Previously</span>
+    <strong>Ch 1:</strong> P cloned itself with <code>fork()</code>. Every clone gets a private copy of memory.<br>
+    <strong>Ch 2:</strong> private copies can't share work, so P put up a whiteboard: <code>mmap(MAP_SHARED | MAP_ANONYMOUS)</code>, created <em>before</em> the fork, visible to both clones.<br><br>
+    Then P gave both clones one job: <strong>count to 2,000,000 together</strong>, 1,000,000 each, on one shared tally. The board said <strong>1,147,382</strong>.
+  </div>
+
+  <!-- ===================== 3.1 ===================== -->
+  <h2 id="race"><span class="sec">3.1</span>The crash: race conditions</h2>
+  <p><code>count++</code> looks like one action. The CPU does it in three:</p>
+<pre><code>LOAD   count -&gt; register   read the board
+ADD    register + 1        math in your head
+STORE  register -&gt; count   write the board</code></pre>
+  <p>The scheduler can switch processes <strong>between any two of those steps</strong>. On a multicore machine the clones don't even take turns: they run at the same instant.</p>
+<pre><code> Parent       Child        board
+ LOAD (5)                    5
+              LOAD (5)       5  &lt;- switch
+ ADD -&gt; 6                    5
+              ADD -&gt; 6       5
+ STORE 6                     6
+              STORE 6        6  &lt;- 2 counts,
+                                  board +1</code></pre>
+
+  <div class="insight">
+    <span class="tag">Definition</span>
+    <strong>Race condition:</strong> the result depends on the <em>timing</em> of the processes, not on the code. Same program, different answer every run.
+  </div>
+
+  <p>Eckhardt's demo ("Mutex part 1"): a child keeps overwriting a shared buffer with two quotes while the parent prints it. The output was pieces of both quotes glued together. "Totally messed up, and that's a race condition." Your own <code>race.c</code> printed 1,350,684, then 1,199,468, then 1,027,896. Never 2,000,000.</p>
+
+  <div class="mcq" data-q="race1"></div>
+  <div class="mcq" data-q="race2"></div>
+
+  <!-- ===================== 3.2 ===================== -->
+  <h2 id="cs"><span class="sec">3.2</span>Critical section + what a mutex must guarantee</h2>
+  <p>The <strong>critical section</strong> is the code that touches the shared data. A <strong>mutex</strong> (<strong>mut</strong>ual <strong>ex</strong>clusion) is the guard on its door. Both processes wrap it the same way:</p>
+<pre><code><span class="c-k">for</span> (i = 0; i &lt; 1000000; i++) {
+    lock(me);      <span class="c-c">// wait for permission</span>
+    (*count)++;    <span class="c-c">// critical section</span>
+    unlock(me);    <span class="c-c">// give it back</span>
+}</code></pre>
+  <p><code>me</code> is 0 for one process and 1 for the other, and <code>other</code> is <code>1 - me</code>. Every variable the lock uses <strong>lives in mmap shared memory</strong>. Otherwise each process checks its own private copy.</p>
+
+  <p>In "Mutex part 2", Eckhardt says a good mutex gives you <strong>three things</strong>:</p>
+  <div class="tscroll narrow"><table class="cardinality-table">
+    <tr><th>#</th><th>Requirement</th><th>Plain English</th></tr>
+    <tr><td>1</td><td><strong>Mutual exclusion</strong></td><td>At most one process inside at a time</td></tr>
+    <tr><td>2</td><td><strong>No deadlock</strong></td><td>They never <em>both</em> wait forever</td></tr>
+    <tr><td>3</td><td><strong>No lockout</strong></td><td>Nobody is shut out while the other isn't even trying</td></tr>
+  </table></div>
+  <p>The next three sections are three tempting designs. <strong>Each one fails exactly one requirement.</strong> Once you see why, Peterson makes sense.</p>
+
+  <div class="mcq" data-q="cs1"></div>
+  <div class="mcq" data-q="cs2"></div>
+  <div class="mcq" data-q="cs3"></div>
+
+  <!-- ===================== 3.3 ===================== -->
+  <h2 id="a1"><span class="sec">3.3</span>Attempt 1: the OCCUPIED sign</h2>
+  <p><strong>Analogy:</strong> a single-stall bathroom with a sign you flip yourself. If it says OCCUPIED, wait. If it says FREE, flip it and go in. Flip it back on the way out.</p>
+<pre><code><span class="c-k">void</span> lock() {
+    <span class="c-k">while</span> (*busy == 1)  <span class="c-c">// OCCUPIED?</span>
+        ;               <span class="c-c">// stand and re-check</span>
+    *busy = 1;          <span class="c-c">// flip, walk in</span>
+}
+<span class="c-k">void</span> unlock() { *busy = 0; }</code></pre>
+  <p>The lone <code>;</code> is an empty loop body: the process does nothing but re-check the sign, over and over. That's <strong>busy waiting</strong> (spinning).</p>
+  <p><strong>The normal case works.</strong> P0 sees FREE, flips it, enters. P1 arrives, sees OCCUPIED, spins. P0 leaves and flips it to FREE. P1's next check sees FREE and it enters.</p>
+  <p><strong>The failure.</strong> <em>Checking</em> and <em>flipping</em> are two separate steps:</p>
+<pre><code>busy=0  P0: sees FREE, about to flip
+            &lt;- switch to P1
+busy=0  P1: sees FREE (P0 hasn't flipped)
+        P1: busy=1, walks in
+            &lt;- switch to P0
+busy=1  P0: resumes at "flip": busy=1, in
+        <span class="c-bad">BOTH INSIDE</span></code></pre>
+  <p>P0 already <em>looked</em>. When it resumes, its next instruction is the flip, not the check, so it never looks again.</p>
+
+  <div class="trap">
+    <span class="tag">The disease</span>
+    <strong>Read, then act, with a gap in between.</strong> That's the same bug as <code>count++</code>. The lock has the very race it was supposed to prevent. If the check and the flip ran as one unbreakable (<strong>atomic</strong>) step, this would work. Plain C assignments aren't atomic.
+  </div>
+
+  <div class="mcq" data-q="a1a"></div>
+  <div class="mcq" data-q="a1b"></div>
+
+  <!-- ===================== 3.4 ===================== -->
+  <h2 id="a2"><span class="sec">3.4</span>Attempt 2: strict turns</h2>
+  <p><strong>Analogy:</strong> a talking stick. Only whoever holds the stick may speak, and when you're done you hand it to the other person.</p>
+<pre><code><span class="c-c">// shared: int *turn, starts at 0</span>
+<span class="c-k">void</span> lock(<span class="c-k">int</span> me) {
+    <span class="c-k">while</span> (*turn != me)  <span class="c-c">// not mine?</span>
+        ;                <span class="c-c">// spin</span>
+}
+<span class="c-k">void</span> unlock(<span class="c-k">int</span> me) {
+    *turn = 1 - me;      <span class="c-c">// hand it over</span>
+}</code></pre>
+  <p><strong>Mutual exclusion holds:</strong> <code>turn</code> is one value at a time, so only one process can match it. Nobody grabs anything. You wait to be <em>handed</em> the turn, so there's no gap.</p>
+  <p><strong>The failure: lockout.</strong> The processes are forced into strict P0, P1, P0, P1 order:</p>
+<pre><code>turn=0  P0: in, count++, turn=1
+turn=1  P0: wants in again -&gt; spins
+        P1: busy elsewhere, or
+            already finished and exited
+turn=1  P0: <span class="c-bad">spins forever</span>.
+        The room is EMPTY.</code></pre>
+  <p>Eckhardt traces this on the whiteboard: the scheduler swaps at the wrong moment and the other process is "locked out... no chance." The stick ends up in the hand of someone who doesn't want to talk.</p>
+
+  <div class="mcq" data-q="a2a"></div>
+
+  <!-- ===================== 3.5 ===================== -->
+  <h2 id="a3"><span class="sec">3.5</span>Attempt 3: raise your hand</h2>
+  <p><strong>Analogy:</strong> in a meeting, raise your hand when you want to speak, and wait while the other person's hand is up.</p>
+<pre><code><span class="c-c">// shared: int flag[2] = {0, 0}</span>
+<span class="c-k">void</span> lock(<span class="c-k">int</span> me) {
+    flag[me] = 1;          <span class="c-c">// I want in</span>
+    <span class="c-k">while</span> (flag[1 - me])  <span class="c-c">// you too?</span>
+        ;                  <span class="c-c">// wait</span>
+}
+<span class="c-k">void</span> unlock(<span class="c-k">int</span> me) { flag[me] = 0; }</code></pre>
+  <p>This fixes Attempt 2: you only wait if the other <strong>actually wants in</strong>. If P1 is off doing something else, its hand is down and P0 walks right in.</p>
+  <p><strong>The failure: deadlock.</strong></p>
+<pre><code>P0: flag[0] = 1       hand up
+P1: flag[1] = 1       hand up
+P0: waits for flag[1] to drop
+P1: waits for flag[0] to drop
+    <span class="c-bad">both polite, stuck forever</span></code></pre>
+  <p>Two people at a doorway, both saying "no, you first," forever.</p>
+
+  <div class="mcq" data-q="a3a"></div>
+
+  <!-- ===================== 3.6 ===================== -->
+  <h2 id="peterson"><span class="sec">3.6</span>Peterson's algorithm</h2>
+  <div class="tscroll narrow"><table class="cardinality-table">
+    <tr><th></th><th>Mutex</th><th>No deadlock</th><th>No lockout</th></tr>
+    <tr><td>1. Sign</td><td class="n">✗</td><td class="y">✓</td><td class="y">✓</td></tr>
+    <tr><td>2. Turns</td><td class="y">✓</td><td class="y">✓</td><td class="n">✗</td></tr>
+    <tr><td>3. Hands</td><td class="y">✓</td><td class="n">✗</td><td class="y">✓</td></tr>
+  </table></div>
+  <p>Attempt 3 has the <strong>intent</strong> (hands). Attempt 2 has the <strong>tiebreaker</strong> (turn). <strong>Peterson uses both.</strong></p>
+<pre><code><span class="c-c">// shared (mmap): flag[2] = {0,0}; turn;</span>
+<span class="c-k">void</span> lock(<span class="c-k">int</span> me) {
+    <span class="c-k">int</span> other = 1 - me;
+    flag[me] = 1;      <span class="c-c">// 1. hand up</span>
+    turn = other;      <span class="c-c">// 2. "after you"</span>
+    <span class="c-k">while</span> (flag[other] &amp;&amp; turn == other)
+        ;              <span class="c-c">// 3. wait only if you</span>
+                       <span class="c-c">//    want in AND it's</span>
+                       <span class="c-c">//    your turn</span>
+}
+<span class="c-k">void</span> unlock(<span class="c-k">int</span> me) { flag[me] = 0; }</code></pre>
+
+  <div class="insight">
+    <span class="tag">The doorway</span>
+    Two people reach a narrow doorway together. Each raises a hand ("I'd like to go") and says <strong>"after you."</strong> If both say it, whoever said it <strong>last</strong> waits, because theirs is the "after you" still standing. The other walks through.
+  </div>
+
+  <p><code>while (flag[other] &amp;&amp; turn == other)</code> means wait while <strong>you want in AND it's your turn</strong>. So I go ahead if <em>either</em>:</p>
+  <ul>
+    <li><code>flag[other] == 0</code>: you don't want in. Go. <span style="color:var(--muted)">(kills lockout)</span></li>
+    <li><code>turn == me</code>: you said "after you" after me. Go. <span style="color:var(--muted)">(breaks the tie)</span></li>
+  </ul>
+
+  <div class="worked-example">
+    <h4>Why all three hold</h4>
+    <div class="step"><span class="step-num">1.</span><span><strong>Mutual exclusion.</strong> If both were inside, both hands are up, so each got past only because <code>turn</code> pointed at itself. P0 needed <code>turn==0</code> and P1 needed <code>turn==1</code>. <code>turn</code> can't be both.</span></div>
+    <div class="step"><span class="step-num">2.</span><span><strong>No deadlock.</strong> Both waiting needs <code>turn==1</code> and <code>turn==0</code> at the same time. Impossible.</span></div>
+    <div class="step"><span class="step-num">3.</span><span><strong>No lockout.</strong> If P1 isn't trying, <code>flag[1]==0</code> and P0 walks in. If P1 leaves and races back, it sets <code>turn=0</code>, which hands priority to P0. It can't cut in line twice.</span></div>
+    <div class="result">The last one to yield is the one that waits.</div>
+  </div>
+
+<pre><code>The tie, traced:
+P0: flag[0]=1
+P1: flag[1]=1
+P0: turn=1        "after you"
+P1: turn=0        "no, after YOU" (last)
+P0: flag[1] &amp;&amp; turn==1 ? no  -&gt; <span class="c-hl">ENTERS</span>
+P1: flag[0] &amp;&amp; turn==0 ? yes -&gt; waits
+P0: unlock, flag[0]=0
+P1: flag[0] ? no             -&gt; <span class="c-hl">ENTERS</span></code></pre>
+
+  <h3>Eckhardt's names vs these names</h3>
+  <p>He builds it on the whiteboard in "Mutex part 2" with different names. It's the same algorithm:</p>
+  <div class="tscroll narrow"><table class="cardinality-table">
+    <tr><th>Lecture</th><th>Here</th><th>Meaning</th></tr>
+    <tr><td><code>flag</code> ("in favor of the other")</td><td><code>turn</code></td><td>tiebreaker</td></tr>
+    <tr><td><code>c1</code>, <code>c2</code> ("attempt to enter")</td><td><code>flag[0]</code>, <code>flag[1]</code></td><td>raised hands</td></tr>
+  </table></div>
+  <p>His story matches this one: a single "favor" variable gives a mutex but can lock someone out, and adding the "attempt" flags fixes it.</p>
+
+  <div class="mcq" data-q="p1"></div>
+  <div class="mcq" data-q="p2"></div>
+  <div class="mcq" data-q="p3"></div>
+  <div class="mcq" data-q="p4"></div>
+  <div class="mcq" data-q="p5"></div>
+
+  <!-- ===================== 3.7 ===================== -->
+  <h2 id="hw"><span class="sec">3.7</span>Why Peterson still miscounts on real CPUs</h2>
+  <p>Peterson is <strong>provably correct on paper</strong>. On a modern multicore machine it can still lose a few counts: in testing, plain Peterson was exact in about half the runs and short by 1 to 5 in the rest. Two reasons, both from Piazza posts the instructor endorsed:</p>
+
+  <h3>1. Store buffers (the hardware)</h3>
+  <p>Each core has a small <strong>store buffer</strong>. Writes go there first and reach shared memory a moment later.</p>
+<pre><code>Core 0               Core 1
+flag[0]=1            reads flag[0]
+ -&gt; [store buffer]    from memory: <span class="c-bad">0!</span>
+   (not visible yet)  -&gt; thinks P0 is
+                        not trying -&gt; IN</code></pre>
+  <p><strong>Analogy:</strong> you raise your hand, but it's behind frosted glass for a split second. The other person looks, sees no hand, and walks in. Peterson's proof assumes writes are visible to the other side immediately, and the hardware breaks that.</p>
+
+  <h3>2. The compiler keeps values in registers</h3>
+  <p>To go fast, the compiler may read <code>flag[other]</code> <strong>once</strong> into a register and spin on that stale copy forever. That's why class code is compiled without optimization (<code>-O0</code>).</p>
+
+  <div class="tscroll narrow"><table class="cardinality-table">
+    <tr><th>Real-world fix</th><th>What it does</th></tr>
+    <tr><td>memory fence</td><td>flushes the store buffer before continuing</td></tr>
+    <tr><td><code>volatile</code></td><td>tells the compiler: re-read memory every time</td></tr>
+    <tr><td>library mutex (<code>pthread_mutex_lock</code>)</td><td>the OS and hardware handle it correctly</td></tr>
+  </table></div>
+
+  <div class="callout">
+    <span class="label">Class scope</span>
+    You won't write any of these for class. Know <strong>why</strong> it can fail, in one sentence: "a write sitting in one core's store buffer isn't visible to the other core yet, so both see the other's flag as 0 and both enter."
+  </div>
+
+  <div class="mcq" data-q="hw1"></div>
+  <div class="mcq" data-q="hw2"></div>
+
+  <!-- ===================== 3.8 ===================== -->
+  <h2 id="design"><span class="sec">3.8</span>Costs and design</h2>
+  <p><strong>Busy waiting burns CPU.</strong> A spinning process re-checks the flag millions of times per second and does nothing useful. Real mutexes put the waiter to <em>sleep</em> and wake it when the lock frees up.</p>
+  <p><strong>Granularity: how much code goes inside the lock?</strong></p>
+<pre><code>FINE: lock; count++; unlock;  x1,000,000
+  + processes interleave (parallel)
+  - millions of lock/unlock calls
+
+COARSE: lock; entire loop; unlock;
+  + one lock call
+  - the other waits the WHOLE time
+    = no parallelism. Why fork at all?</code></pre>
+  <div class="insight">
+    <span class="tag">Senior move</span>
+    Count <strong>locally</strong> in a plain non-shared <code>int</code>, then lock <strong>once</strong> at the end to add your total to the shared counter. You get full parallelism and almost no locking. Keep it in your back pocket; class asks for the simple version.
+  </div>
+
+  <div class="mcq" data-q="g1"></div>
+  <div class="mcq" data-q="g2"></div>
+
+  <!-- ===================== summary ===================== -->
+  <h2 id="summary">One-screen summary</h2>
+<pre><code>race   = timing decides the result
+         count++ is LOAD / ADD / STORE
+crit.  = the code touching shared data
+mutex  = mutual excl. + no deadlock
+         + no lockout
+
+sign   check-then-flip gap  -&gt; both in
+turns  strict alternation   -&gt; lockout
+hands  both hands up        -&gt; deadlock
+PETERSON
+  flag[me]=1; turn=other;
+  while (flag[other] &amp;&amp; turn==other);
+  last to say "after you" waits
+
+real CPUs: store buffer hides writes
+  -&gt; plain Peterson can miss counts
+lecture names: flag = turn,
+               c1/c2 = flag[0]/flag[1]</code></pre>
+
+  <div class="trap">
+    <span class="tag">Common mistakes</span>
+    Lock variables in normal memory instead of mmap &middot; setting <code>turn</code> before raising your hand &middot; <code>||</code> instead of <code>&amp;&amp;</code> in the wait &middot; forgetting <code>unlock</code> on some path &middot; compiling with <code>-O2</code> &middot; "I ran it 10 times, so it's correct."
+  </div>
+
+  <h2 id="score">Your score</h2>
+  <div id="results"></div>
+
+  <footer class="nav">
+    <span>CSC 2050 &middot; Chapter 3</span>
+    <a href="05-directories.html" style="color:var(--white)">Next &rarr; Ch 5: Directories</a>
+  </footer>
+</main>
+
+<script>
+window.QUIZ = {
+  race1: {
+    tag: "3.1 Race conditions",
+    q: "Two processes share <code>count</code> through mmap. Which statement about <code>(*count)++</code> is true?",
+    opts: [
+      { t: "It's one CPU instruction, so it can't be interrupted", why: "It's three steps: load, add, store. The scheduler can switch processes between any two of them." },
+      { t: "It's load, add, store, and a switch can land between them", why: "Exactly. If both processes load the same old value, one increment is lost." },
+      { t: "It's only unsafe on a single-core machine", why: "Multicore is worse, not better: the processes really do run at the same instant." },
+      { t: "It's safe because mmap memory is shared", why: "Sharing is the reason it's unsafe. Private copies can't collide; a shared counter can." }
+    ], a: 1 },
+  race2: {
+    tag: "3.1 Race conditions",
+    q: "Each process increments the shared counter 1,000,000 times with no lock. What final values are possible?",
+    opts: [
+      { t: "Exactly 2,000,000 every time", why: "Only with a working mutex. Without one, collisions lose updates." },
+      { t: "Anything up to 2,000,000, usually less, varying per run", why: "Right. A collision only ever loses an update, and how many collide depends on timing, so it changes every run." },
+      { t: "Sometimes above 2,000,000", why: "A collision makes two increments count as one. Nothing ever makes one increment count twice." },
+      { t: "Exactly 1,000,000, since one process overwrites the other", why: "They interleave constantly. Some updates are lost, not all of one process's work." }
+    ], a: 1 },
+  cs1: {
+    tag: "3.2 Critical section",
+    q: "In this loop, which part is the critical section?",
+    code: "for (i = 0; i < N; i++) {\n    lock(me);\n    (*count)++;\n    unlock(me);\n}",
+    opts: [
+      { t: "<code>for (i = 0; i &lt; N; i++)</code>", why: "<code>i</code> is a private local variable. Each process has its own copy, so there's nothing to protect." },
+      { t: "<code>lock(me)</code>", why: "That's the guard on the door, not the room it protects." },
+      { t: "<code>(*count)++</code>", why: "Yes. It's the only line that touches the shared data." },
+      { t: "<code>unlock(me)</code>", why: "That's the guard releasing the door. The critical section sits between lock and unlock." }
+    ], a: 2 },
+  cs2: {
+    tag: "3.2 Critical section",
+    q: "Why must the lock's own variables (<code>flag</code>, <code>turn</code>) live in mmap shared memory?",
+    opts: [
+      { t: "mmap memory is faster than normal variables", why: "Speed isn't the issue. Visibility is." },
+      { t: "After fork, normal variables are private copies, so the other process never sees your flag", why: "Right. If P0 raises a hand in its own copy, P1 is looking at a different copy that never changes." },
+      { t: "The compiler refuses to compile lock code otherwise", why: "It compiles fine. It just silently protects nothing." },
+      { t: "To prevent zombie processes", why: "Zombies come from a missing wait(), which has nothing to do with locks." }
+    ], a: 1 },
+  cs3: {
+    tag: "3.2 Requirements",
+    q: "P0 waits forever even though P1 isn't trying to enter the critical section at all. Which requirement is broken?",
+    opts: [
+      { t: "Mutual exclusion", why: "Mutual exclusion breaks when two are inside at once. Here nobody is inside." },
+      { t: "No deadlock", why: "Deadlock needs both stuck waiting on each other. P1 isn't waiting at all." },
+      { t: "No lockout", why: "Yes. One process is shut out while the other isn't even competing." },
+      { t: "None. Waiting is how a mutex works", why: "Waiting is fine when someone is inside. Waiting at an empty room is the bug." }
+    ], a: 2 },
+  a1a: {
+    tag: "3.3 Attempt 1: the sign",
+    q: "Where exactly is the gap that lets both processes into the room?",
+    code: "while (*busy == 1) ;\n*busy = 1;",
+    opts: [
+      { t: "Between the <code>while</code> check and <code>*busy = 1</code>", why: "Yes. Both can pass the check (see FREE) before either one flips the sign." },
+      { t: "Inside <code>unlock</code>, between leaving and setting <code>busy = 0</code>", why: "That's a single store. Setting busy late only makes the other wait longer; it never lets two in." },
+      { t: "In the empty loop body <code>;</code>", why: "The empty body just means keep checking. The danger is what happens after the check passes." },
+      { t: "There's no gap; the sign works as long as busy is in mmap", why: "Being shared is necessary but not enough. Check-then-act is still two separate steps." }
+    ], a: 0 },
+  a1b: {
+    tag: "3.3 Attempt 1: the sign",
+    q: "Which requirement does the OCCUPIED sign fail?",
+    opts: [
+      { t: "Mutual exclusion", why: "Correct. Both can read FREE before either flips the sign, so both end up inside." },
+      { t: "No deadlock", why: "Nobody waits forever. If anything, they get in too easily." },
+      { t: "No lockout", why: "A free room always lets you in, so lockout isn't the problem." },
+      { t: "All three", why: "It fails exactly one. That's why the three attempts make good teaching examples." }
+    ], a: 0 },
+  a2a: {
+    tag: "3.4 Attempt 2: turns",
+    q: "With strict turns, P0 loops 1,000,000 times but P1 only 10 times. What happens?",
+    opts: [
+      { t: "Works perfectly: P0 just gets more turns at the end", why: "There are no extra turns. P0 must wait for P1 to hand <code>turn</code> back, and P1 has exited." },
+      { t: "P0 waits forever after P1's last turn", why: "Right. P1 leaves <code>turn = 0</code>, P0 enters once, hands turn to 1, and spins forever: lockout." },
+      { t: "Both end up in the critical section", why: "Strict turns do keep mutual exclusion. <code>turn</code> is only ever one value." },
+      { t: "P1 waits forever", why: "P1 finished its 10 iterations and exited. It's P0 that gets stuck." }
+    ], a: 1 },
+  a3a: {
+    tag: "3.5 Attempt 3: hands",
+    q: "P0 sets <code>flag[0] = 1</code>, a switch happens, P1 sets <code>flag[1] = 1</code>. Now what?",
+    opts: [
+      { t: "P0 enters, since it raised its hand first", why: "Raising first gives no priority. P0 still waits while <code>flag[1]</code> is up." },
+      { t: "Both enter the critical section", why: "Each waits on the other's flag, so neither enters." },
+      { t: "Both wait on each other forever: deadlock", why: "Exactly. Each is politely waiting for a hand that will never drop." },
+      { t: "The OS notices and wakes one up", why: "The OS doesn't know these are locks. To it, they're just two loops spinning." }
+    ], a: 2 },
+  p1: {
+    tag: "3.6 Peterson",
+    q: "Which is Peterson's <code>lock()</code>?",
+    opts: [
+      { t: "<code>turn = other; flag[me] = 1;</code><br><code>while (flag[other] &amp;&amp; turn == other);</code>", why: "The two writes are in the wrong order: you must raise your hand before you yield (see the next questions)." },
+      { t: "<code>flag[me] = 1; turn = other;</code><br><code>while (flag[other] || turn == other);</code>", why: "<code>||</code> waits whenever the other merely wants in, so with both hands up both wait: deadlock." },
+      { t: "<code>flag[me] = 1; turn = other;</code><br><code>while (flag[other] &amp;&amp; turn == other);</code>", why: "Correct: hand up, then 'after you', then wait only if you want in AND it's your turn." },
+      { t: "<code>flag[me] = 1; turn = me;</code><br><code>while (flag[other] &amp;&amp; turn == other);</code>", why: "Taking the turn for yourself means both can claim it; the yield (turn = other) is what breaks ties correctly." }
+    ], a: 2 },
+  p2: {
+    tag: "3.6 Peterson",
+    q: "Both hands are up. P0 writes <code>turn = 1</code>, then P1 writes <code>turn = 0</code>. Who enters first?",
+    opts: [
+      { t: "P0", why: "Right. P1 said 'after you' last, so P1 waits. P0's check <code>turn == 1</code> is false, so P0 goes." },
+      { t: "P1", why: "P1's write was the last 'after you'. The last one to yield is the one that waits." },
+      { t: "Both", why: "<code>turn</code> is 0, so only P1's wait condition (<code>turn == 0</code>) holds. Exactly one waits." },
+      { t: "Neither: deadlock", why: "Deadlock would need <code>turn</code> to be 0 and 1 at once, which is impossible." }
+    ], a: 0 },
+  p3: {
+    tag: "3.6 Peterson",
+    q: "What breaks if you set <code>turn = other</code> BEFORE <code>flag[me] = 1</code>?",
+    opts: [
+      { t: "Nothing; order doesn't matter between two assignments", why: "Order matters here. Trace it: P0: turn=1 (switch) → P1: flag[1]=1, turn=0, sees flag[0]==0 → enters. → P0: flag[0]=1, sees turn==0 → enters. Both inside." },
+      { t: "Deadlock", why: "No one gets stuck. The problem is the opposite: both get in." },
+      { t: "Mutual exclusion: both can enter", why: "Right. P1 can check P0's flag in the window before P0 raises it. Hand up first, then yield." },
+      { t: "Lockout", why: "Lockout is waiting at an empty room. This bug lets two into a full one." }
+    ], a: 2 },
+  p4: {
+    tag: "3.6 Lecture names",
+    q: "In Eckhardt's whiteboard version, what do his <code>c1</code> and <code>c2</code> correspond to?",
+    opts: [
+      { t: "<code>turn</code>", why: "His tiebreaker is the variable he calls <code>flag</code> ('in favor of the other')." },
+      { t: "<code>flag[0]</code> and <code>flag[1]</code>: 'I'm attempting to enter'", why: "Yes. c1/c2 are the raised hands, and his <code>flag</code> is our <code>turn</code>. Watch for the swapped names on the quiz." },
+      { t: "The two critical sections", why: "There's one critical section (the shared data). c1/c2 are per-process intent variables." },
+      { t: "The child's and parent's PIDs", why: "PIDs don't appear in Peterson at all. It only uses <code>me</code> = 0 or 1." }
+    ], a: 1 },
+  p5: {
+    tag: "3.6 Peterson",
+    q: "P1 never calls <code>lock()</code> (it's busy with other work). Can P0 enter?",
+    opts: [
+      { t: "Only if <code>turn == 0</code>", why: "<code>turn</code> doesn't matter here: <code>flag[1] == 0</code> already makes the whole condition false." },
+      { t: "Yes, immediately: <code>flag[1] == 0</code> makes the wait condition false", why: "Right. That's how Peterson avoids lockout, and why Attempt 2 couldn't." },
+      { t: "No, it waits until P1 hands over the turn", why: "That's Attempt 2's flaw. Peterson only waits when the other actually wants in." },
+      { t: "Only after P1 calls unlock()", why: "P1 never locked, so there's nothing to unlock. Its flag is already 0." }
+    ], a: 1 },
+  hw1: {
+    tag: "3.7 Real CPUs",
+    q: "Why can plain Peterson occasionally let both processes in on a multicore machine?",
+    opts: [
+      { t: "The algorithm is mathematically wrong", why: "It's provably correct, assuming writes are seen immediately. The hardware breaks that assumption." },
+      { t: "A write can sit in one core's store buffer, so the other core still reads the old flag = 0", why: "Yes. That's the instructor-endorsed Piazza explanation: both see the other's hand as down and both enter." },
+      { t: "mmap memory isn't really shared between cores", why: "It is shared. The issue is the timing of when a write becomes visible." },
+      { t: "The scheduler is unfair", why: "Fairness affects waiting time, not correctness. The failure is both being inside at once." }
+    ], a: 1 },
+  hw2: {
+    tag: "3.7 Real CPUs",
+    q: "When the mutex occasionally fails, the shared counter comes out...",
+    opts: [
+      { t: "too high", why: "A failure drops you back to the plain count++ race, which only ever loses updates." },
+      { t: "too low, by a few", why: "Right. A brief double entry is the same LOAD/ADD/STORE collision, so the count comes out low." },
+      { t: "random, higher or lower", why: "It's not random in direction. Collisions can only lose increments." },
+      { t: "correct; failures only slow it down", why: "A double entry corrupts the count. That's the point of a mutex." }
+    ], a: 1 },
+  g1: {
+    tag: "3.8 Design",
+    q: "A process locks once around its ENTIRE 1,000,000-iteration loop. Is the final count right? Is it fast?",
+    opts: [
+      { t: "Right, and fast", why: "It's right, but the other process sits waiting for the whole loop. There's no parallelism left." },
+      { t: "Right, but no parallelism: effectively one process at a time", why: "Exactly. Correctness is fine; you've just undone the reason you forked." },
+      { t: "Wrong, because the lock is held too long", why: "Holding a lock long hurts speed, not correctness." },
+      { t: "Wrong, and slow", why: "Only one process touches count at a time, so it's correct." }
+    ], a: 1 },
+  g2: {
+    tag: "3.8 Design",
+    q: "What's the 'senior' way to get both correctness and speed for this counter?",
+    opts: [
+      { t: "Lock around every increment (fine-grained)", why: "That's correct, but it means millions of lock/unlock calls and constant contention." },
+      { t: "Don't lock; the error is usually small", why: "'Usually small' is still wrong, and the in-lab check expects an exact count." },
+      { t: "Count in a private local int, then lock once to add it to the shared total", why: "Yes. The loops run fully in parallel and you lock exactly once per process." },
+      { t: "Use wait() after every increment", why: "wait() blocks until a child dies. It isn't a lock and doesn't fit here." }
+    ], a: 2 }
+};
+</script>
+<script src="../assets/lesson.js"></script>
+<script src="../assets/glossary.js"></script>
+<script src="../assets/course.js"></script>
+<script src="../assets/toolbar.js"></script>
+<script src="../assets/mcq.js"></script>
+</body>
+</html>
